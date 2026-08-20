@@ -9,36 +9,38 @@ jobs:
     timeout-minutes: 360
 
     steps:
-      - name: 1. Enable Remote Desktop & Firewall
+      - name: 1. Enable Remote Desktop & Firewall & stable RDP settings
         run: |
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fDenyTSConnections" -Value 0
           Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
           Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -name "UserAuthentication" -Value 0
+          # --- stability hardening for weak/high-latency links ---
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "KeepAlive" -Value 1
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -name "fSingleSessionPerUser" -Value 0
+          $tcp = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+          Set-ItemProperty -Path $tcp -name "MinEncryptionLevel" -Value 1
+          Set-ItemProperty -Path $tcp -name "MaxIdleTime" -Value 0
+          Set-ItemProperty -Path $tcp -name "MaxConnectionTime" -Value 0
+          Set-ItemProperty -Path $tcp -name "DisconnectedSessionLimit" -Value 0
+          Set-ItemProperty -Path $tcp -name "KeepAliveInterval" -Value 1
 
       - name: 2. Create Admin Account
         run: |
           $Password = ConvertTo-SecureString "Nexouya2026RdpX7" -AsPlainText -Force
           New-LocalUser -Name "NexAdmin" -Password $Password -PasswordNeverExpires -ErrorAction SilentlyContinue
           Add-LocalGroupMember -Group "Administrators" -Member "NexAdmin" -ErrorAction SilentlyContinue
-          net user runneradmin Nexouya2026RdpX7
+          net user NexAdmin Nexouya2026RdpX7
 
       - name: 3. Install & Connect Tailscale VPN
         env:
           TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
         run: |
-          # Download and install Tailscale silently
           Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi" -OutFile "C:\tailscale.msi"
           Start-Process msiexec -ArgumentList "/i C:\tailscale.msi /quiet /norestart" -Wait
-          
-          # Connect to Tailscale network
           Start-Sleep -Seconds 5
           & "C:\Program Files\Tailscale\tailscale.exe" up --authkey="$Env:TAILSCALE_AUTHKEY" --hostname="github-rdp-server"
-          
-          Start-Sleep -Seconds 8
-          
-          # Get Tailscale IP
+          Start-Sleep -Seconds 10
           $ts_ip = & "C:\Program Files\Tailscale\tailscale.exe" ip -4
-          
           Write-Host ""
           Write-Host "==================================================" -ForegroundColor Green
           Write-Host "  >>> RDP SERVER IS READY! <<<" -ForegroundColor Cyan
@@ -46,9 +48,18 @@ jobs:
           Write-Host "  Username     : NexAdmin" -ForegroundColor Yellow
           Write-Host "  Password     : Nexouya2026RdpX7" -ForegroundColor Yellow
           Write-Host "  >> Open mstsc and connect to: $ts_ip" -ForegroundColor Magenta
+          Write-Host "  SSH channel  : ssh NexAdmin@$ts_ip  (password same)" -ForegroundColor Cyan
           Write-Host "==================================================" -ForegroundColor Green
 
-      - name: 4. Keep Server Alive (6 Hours)
+      - name: 4. Install OpenSSH Server (stable alternative channel)
+        run: |
+          Add-WindowsCapability -Online -Name OpenSSH.Server~~~~0.0.1.0 -ErrorAction SilentlyContinue
+          Start-Service sshd -ErrorAction SilentlyContinue
+          Set-Service -Name sshd -StartupType Automatic -ErrorAction SilentlyContinue
+          New-NetFirewallRule -Name "OpenSSH-Server" -DisplayName "OpenSSH Server" -Enabled True -Direction Inbound -Protocol TCP -Action Allow -LocalPort 22 -ErrorAction SilentlyContinue
+          Write-Host "OpenSSH installed."
+
+      - name: 5. Keep Server Alive (6 Hours)
         run: |
           for ($i = 1; $i -le 360; $i++) {
             Start-Sleep -Seconds 60
